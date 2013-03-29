@@ -4,24 +4,10 @@ namespace BenBenson;
 
 use \Config;
 use \Exception;
+use \InvalidArgumentException;
 use \Aws\DynamoDb\DynamoDbClient;
 use \Aws\Common\Enum\Region;
 use \Aws\DynamoDb\Exception\DynamoDbException;
-
-
-/*
-    TODO
-	- preloading method 
-		- preloadAllRelations($cascade=false)
-	- offer automatic uuid generation
-	- custom exception(s)
-	- handle S, N, SS, NN with schema config
-	- delete of attribute should potentially delete its relation mapping  (cascade?)
-
-    FUTURE
-	- method for validating table mapping configuration
-	- create cascading save
-*/
 
 class DynamoObject
 {
@@ -58,6 +44,10 @@ class DynamoObject
 			return $this->data[Config::$dynamo_table_mapping[$this->tableName]['hashKey']];
 		}
 	}
+	public function getHashKeyName()
+	{
+		return Config::$dynamo_table_mapping[$this->tableName]['hashKey'];
+	}
 	public function setHashKey($value)
 	{
 		if ($this->getHashKey() == $value)
@@ -79,6 +69,13 @@ class DynamoObject
 			{
 				return $this->data[Config::$dynamo_table_mapping[$this->tableName]['rangeKey']];
 			}
+		}
+	}
+	public function getRangeKeyName()
+	{
+		if ($this->hasRangeKey())
+		{
+			return Config::$dynamo_table_mapping[$this->tableName]['rangeKey'];
 		}
 	}
 	public function setRangeKey($value)
@@ -301,11 +298,7 @@ class DynamoObject
 		$this->isLoaded = true;
         }
 
-
-	// we allow the caller to perform even when isLoaded==false...  
-	// dangerous, but we give them the power
-
-        public function addReplace()
+        public function put()
         {
                	if (! $this->isKeyValid())
 		{
@@ -531,39 +524,62 @@ class DynamoObject
 		self::$objectCache[$obj->getTableName()][$obj->getId()] = $obj;
 	}
 
+	public static function genUUIDv4()
+	{
+            return sprintf( '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+                // 32 bits for "time_low"
+                mt_rand( 0, 0xffff ), mt_rand( 0, 0xffff ),
+
+                // 16 bits for "time_mid"
+                mt_rand( 0, 0xffff ),
+
+                // 16 bits for "time_hi_and_version",
+                // four most significant bits holds version number 4
+                mt_rand( 0, 0x0fff ) | 0x4000,
+
+                // 16 bits, 8 bits for "clk_seq_hi_res",
+                // 8 bits for "clk_seq_low",
+                // two most significant bits holds zero and one for variant DCE1.1
+                mt_rand( 0, 0x3fff ) | 0x8000,
+
+                // 48 bits for "node"
+                mt_rand( 0, 0xffff ), mt_rand( 0, 0xffff ), mt_rand( 0, 0xffff )
+            );
+	}
 
 
-	// TODO:  pass in objects instead of generic array
-        public static function batch_put($tableItems)
+        public static function batch_put(array $objs)
         {
                 self::initialize();
-                $ditems = array();
+                $batch = array();
                 $i = 0;
 
-                foreach ($tableItems as $table => $items)
+                foreach ($objs as $obj)
                 {
-                    foreach ($items as $item)
-                    {
-                     	$i++;
-                        $ditems['RequestItems'][$table][]['PutRequest']['Item'] = self::getClient()->formatAttributes($item);
+			if (! $obj instanceof $this)
+			{
+				throw new InvalidArgumentException();
+			}
+
+                    	$i++;
+                        $batch['RequestItems'][$obj->getTableName()][]['PutRequest']['Item'] = self::getClient()->formatAttributes($obj->getInternalDataArray());
 
                         if ($i == 25)
                         {
-                                $response = self::getClient()->batchWriteItem($ditems);
+                                $response = self::getClient()->batchWriteItem($batch);
 
                                 // examine for any failures
-                               	if (! empty($response["UnprocessedItems"]))
+                               	if (! empty($response['UnprocessedItems']))
                                 {
                                        	return false;
                                	}
                                	$i=0;
-                                $ditems = array();
+                                $batch = array();
                         }
-                    }
                 }
                 if ($i > 0)
                 {
-                       	$response = self::getClient()->batchWriteItem($ditems);
+                       	$response = self::getClient()->batchWriteItem($batch);
 
                         // examine for any failures
                        	if (! empty($response['UnprocessedItems']))
@@ -578,37 +594,40 @@ class DynamoObject
         // $tableItems["table1"][] = array( key )
         // $tableItems["table1"][] = array( key, range )
         // will throw exception if all items are not found
-	// TODO: convert to returning objects
-        public static function batch_get($tableItems)
+	// TODO: fix for returned table name...
+
+        public static function batch_get(array $tableKeys)
         {
                 self::initialize();
-                $req = array();
+                $batch = array();
 
-                foreach ($tableItems as $table => $items)
+                foreach ($tableKeys as $table => $keylist)
                 {
-                        foreach ($items as $item)
-                        {
-                                if (count($item) == 2)
-                                {
-                                        $req['RequestItems'][$table]['Keys'][] = array(
+			foreach ($keylist as $key)
+			{
+                               if (count($key) == 2)
+                               {
+                                        $batch['RequestItems'][$table]['Keys'][] = array(
                                                 'HashKeyElement' => array(
-                                                        self::type($item[0]) => $item[0]
+                                                        self::type($key[0]) => $key[0]
                                                 ),
                                                 'RangeKeyElement' => array(
-                                                        self::type($item[1]) => $item[1]
+                                                        self::type($key[1]) => $key[1]
                                                 )
                                         );
                                 }
                                 else
                                 {
-                                        $req['RequestItems'][$table]['Keys'][] = array(
-                                                'HashKeyElement' => array(self::type($items[0]) => $items[0])
+                                        $batch['RequestItems'][$table]['Keys'][] = array(
+                                                'HashKeyElement' => array(self::type($key[0]) => $key[0])
                                         );
                                 }
                         }
                 }
 
-                $result = self::getClient()->batchGetItem( $req );
+                $result = self::getClient()->batchGetItem( $batch );
+
+		error_log( print_r($result, true) );
 
                 if (! $result || ! $result['Responses'] || ! $result['Responses']['Items'])
                 {
@@ -618,6 +637,7 @@ class DynamoObject
                 $r = array();
                 foreach ($result['Responses']['Items'] as $item)
                 {
+			$clazz = self::getObjectClass($item->getTableName())
                         $r[] = self::unformat($item);
                 }
 
@@ -780,7 +800,7 @@ class DynamoObject
 		foreach ($data as $n => $v)
 		{
 			// we allow changes to keys, but will reset loaded state
-			if ($n == Config::$dynamo_table_mapping[$this->tableName]['hashKey'])
+			if ($n == $this->getHashKeyName())
 			{
 				if ($this->getHashKey() && $this->getHashKey() != $v)
 				{
@@ -788,7 +808,7 @@ class DynamoObject
 					$this->isLoaded = false;
 				}
 			}
-			else if ($this->hasRangeKey() && $n == Config::$dynamo_table_mapping[$this->tableName]['rangeKey'])
+			else if ($this->hasRangeKey() && $n == $this->getRangeKeyName())
 			{
 				if ($this->getRangeKey() && $this->getRangeKey() != $v)
 				{
@@ -817,14 +837,42 @@ class DynamoObject
 
 	public function __isset($name)
 	{
-		return isset($this->data[$name]);
+		if (isset($this->data[$name])
+		{
+			return true;
+		}
+		foreach ($this->data as $n)
+		{
+			if (self::startsWith($n, $name . '.'))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 	public function __unset($name)
 	{
 		if (isset($this->data[$name]))
 		{
+			if (isset($this->relations[$name]))
+			{
+				unset($this->relations[$name]);
+			}
 			unset($this->data[$name]);
+			return;
 		}
+		foreach ($this->data as $n)
+		{
+			if (self::startsWith($n, $name . '.'))
+			{
+				if (isset($this->relations[$n]))
+				{
+					unset($this->relations[$n]);
+				}
+				unset($this->data[$n]);
+			}
+		}
+
 	}
 
 
@@ -1093,6 +1141,11 @@ class DynamoObject
 		}
 
 		return true;
+	}
+
+	protected function getInternalDataArray()
+	{
+		return $this->data;
 	}
 
 }

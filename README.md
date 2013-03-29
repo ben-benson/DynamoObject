@@ -7,51 +7,54 @@ I wrote this for my own purposes, but thought I might as well turn it out into t
 
 This is an alpha release...  I intend to provide updates as I make them.
 
+
 ## Features
 
 * Lazy loading of object relations
 * Access table and key information without invoking lazy loader
-* Optionally preload objects in batch get (lazy loading will be there as backup)
-* Define relations using regular expression patterns
+* Preload objects in batch get (graceful fallback to lazy loader)
+* Define relations using regexp patterns
 * Access name/value pairs as multi-dimensional array
-* Sane methods: load(), update(), insert(), addReplace() and delete()
+* Sane methods: insert(), update(), put(), delete() and load()
+* Never makes DB calls that you don't expect/request
 * For loaded entities, performs update on only changed columns
-* Allows addReplace without initial load from DB
+* Allows put() call to replace any existing entity without initial load from DB
 * Very simple configuration
 * Subclass to create specific object types and add your own helper methods
 * Maintains request-scope cache of retrieved objects
-* Detects change to object key(s)
+* Detects change to object key(s) so you can reuse object as template
 
 
 ## Example Usage
 
     use \BenBenson\DynamoObject;
 
-    $account_uuid = '067e6162-3b6f-4ae2-a171-2470b63dff00';
-    $range_id = '03ba2702-0cf8-4626-9781-3c18c67ae0d6';
+    $account_uuid = DynamoObject::genUUIDv4();
+    $range_id = DynamoObject::genUUIDv4();
 
-    // create new object of table name 'objekt'
+    // CONSTRUCT NEW OBJECT  (class instantiated based on table config)
     $objekt = DynamoObject::create('objekt', $account_uuid, $range_id);
     $objekt->property1 = 'some value';
     $objekt->property2 = 'another value';
     $objekt->insert();
 
-    // construct object from table name and IDs -- use cache 
+    // GET EXISTING OBJECT BY ID  (uses cache)
     $o = DynamoObject::fetch('objekt', $account_uuid, $range_id);
     
-    // treat name/value pairs as multi-dimensional arrays using dot "." notation
+
+    // MULTI-DIMENSIONAL ARRAYS (using dot "." notation)
     $o->{'somearray.sub_a.name1'} = 'value 1';
     $o->{'somearray.sub_a.name2'} = 'value 2';
     $o->{'somearray.sub_b.name1'} = 'value 3';
     $o->update();
 
-    // walk the array
-    foreach ($o->somearray as $sub) {
-        foreach ($sub as $name => $value) {
-    	    print "$value\n";
-        }
-    }
+    $array = $o->somearray;
+    $array['sub_b']['name2'] = 'value 4';
+    $array['sub_c']['name1'] = 'value 5';
 
+    $o->somearray = $array;  // apply changes to object
+    $o->update();
+    
 
 ## METHODS
 ### Instance Methods
@@ -59,10 +62,12 @@ This is an alpha release...  I intend to provide updates as I make them.
     // id methods
 	public function getTableName()
     public function getId()
-	public function getHashKey()
+    public function getHashKey()
+    public function getHashKeyName()    
 	public function setHashKey($value)
 	public function hasRangeKey()
-	public function getRangeKey()
+    public function getRangeKey()
+    public function getRangeKeyName()
 	public function setRangeKey($value)
 	public function isKeyValid()
 
@@ -78,17 +83,17 @@ This is an alpha release...  I intend to provide updates as I make them.
 
 
 ### Persistence Methods
-	public function load()
-    public function update()
-    public function insert()
-    public function addReplace()
-    public function delete()
+
+    public function insert()    // exception if exists
+    public function update()    // exception if not existing, reloads object afterward
+    public function put()       // replace if exists, returns old values
+    public function delete()    // exception if not existing
+    public function load()      // reload from DB
 
 
 ### Factories
 
-	// construct new object
-    // automatically chooses correct object class according to table config
+	// construct new object -- instantiates object class according to table config
 	public static function create($table, array $data=array())
 
 	// retrieve an object from cache or from the database given its table and key(s)
@@ -104,9 +109,11 @@ This is an alpha release...  I intend to provide updates as I make them.
 
 	// return current Dynamo Client
 	public static function getClient()
+    
     public static function getObjectClass($table)
 	public static function add2cache(\Spiderline\DynamoObject $obj)
-
+    public static function genUUIDv4()
+    
     public static function batch_put($tableItems)
     public static function batch_get($tableItems)
 
@@ -143,6 +150,17 @@ This is an alpha release...  I intend to provide updates as I make them.
                 )
         );
     }
+
+
+## TODO
+
+* output to json
+* protected access to internal data array
+* preloadAllRelations($cascade=false)
+* custom exception(s)
+* handle S, N, SS, NN with schema config
+* method for validating table mapping configuration
+* cascading save
 
 
 ## Author 
