@@ -2,7 +2,6 @@
 
 namespace BenBenson;
 
-use \Config;
 use \Exception;
 use \BenBenson\DynamoObject;
 
@@ -19,7 +18,7 @@ class DynamoObjectProxy
 
 	public function __construct($tableName, $hashKey, $rangeKey=null)
 	{
-		if (! isset(Config::$dynamo_table_mapping[$tableName]))
+		if (! isset(DynamoObject::$config['tables'][$tableName]))
 		{
 			throw new Exception('no table config for ' . $tableName);
 		}
@@ -122,4 +121,31 @@ class DynamoObjectProxy
 		unset($this->getInstance()->$name);
 	}
 
+
+        public function isKeyValid()
+        {
+                if (! $this->getHashKey())
+               	{
+                        return false;
+               	}
+                if ($this->hasRangeKey() && ! $this->getRangeKey())
+               	{
+                        return false;
+                }
+                return true;
+        }
+
+	public function isProxy()
+	{
+		return true;
+	}
+
+	public function isProxyObjectLoaded()
+	{
+		if ($this->instance == null)
+		{
+			return false;
+		}
+		return true;
+	}
 }
