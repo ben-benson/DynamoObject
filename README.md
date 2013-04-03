@@ -3,7 +3,7 @@ DynamoObject
 
 Dynamo PHP ORM  --  Object relational mapper for Amazon Dynamo, written in PHP.
 
-I wrote this for my own purposes, but thought I might as well turn it out into the wild.  This ORM is tailored for Amazon Dynamo.  Unlike other ORMs I've seen, it allows one to define object relations using pattern matching - and therefore does not restrict the power of no-sql dynamic column creation.
+I wrote this for my own purposes, but thought I might as well release it out into the wild.  This ORM is tailored for Amazon Dynamo.  Among many other features, it allows you to define object relations using pattern matching - and therefore does not restrict the power of no-sql dynamic column creation.
 
 This is an alpha release...  I intend to provide updates as I make them.
 
@@ -14,183 +14,144 @@ This is an alpha release...  I intend to provide updates as I make them.
 * Lazy loading
     * Access table and key information without invoking lazy loader
     * Preload objects in batch with graceful fallback to lazy loader
-    * Define relations using regexp patterns
-    * Reference values can be 'hash_key', 'range_key' or 'hash.range'
-    * If reference value is 'range_key', required hash_key property is automatically looked up
 * Access name/value pairs as multi-dimensional array
+    * property1.abc.name=value ... becomes ... $obj->property1['abc']['name']='value';
 * Sane methods:
-    * Dynamo::create('tableName') - create new object for given table
     * insert() - exception if exists
     * update() - exception if not existing, refreshes all properties
     * put() - replaces any existing, returns old values
     * delete() - exception if not exists
     * load() - load properties from DB
+    * see other methods in documentation below....
 * Optimized for speed
     * Never makes DB calls that you don't expect/request
-    * Allows put() call to replace any existing entity without initial load from DB
+    * Allows put() call to replace any existing entity without first loading from DB
     * For loaded entities, performs update on only changed columns
     * Maintains request-scope cache of retrieved objects
     * Refreshes all object properties on update() - no additional dynamo call needed
 * Very simple configuration
-    * DynamoObject::initialize($config_array);
-* Subclass to create specific object types and add your own helper methods
+    * Just subclass DynamoObject and define a few methods
+* Add your own custom helper methods per object
 * Detects change to object key(s) so you can reuse object as template
-* Automatically generated keys with support for custom defined key generators
-* Sacrifices some automation for flexibility
-	* Store references to other tables under any property name you like
-	* Allows you to get maximum power out of dynamic no-sql schema:
-	* For example, log records with reference to related object:
-		* history.<date> = <reference_uuid>
+* Automatically generate keys 
+    * Use your own custom defined key generators
+    * Use the provided UUIDv4 generator
+* Flexible references
+    * Store references to other tables under any property name you like
+    * Define relations using regexp patterns
+    * Reference values can be 'hash', 'range' or 'hash.range'
+    * If reference value is 'range', required hash property is automatically derived
+	* Allows you to get maximum power out of dynamic no-sql schema
+	* For example, log records with reference to a related object:
+		* history.&lt;date&gt; = &lt;reference_uuid&gt;
 
 ## Example Usage
 
-    use \BenBenson\DynamoObject;
-
-
-    header("Content-Type: text/plain");
-
-    DynamoObject::initialize( getConfig() );  // read below
-
+Take a look at the provided 'test.php' script.  Here are some examples.
 
     // CREATE TABLES FROM CONFIG
-    //DynamoObject::createTable('test_account');
-    //DynamoObject::createTable('test_user');
+    TestAccount::createTable();
+    TestUser::createTable();
 
     // INSERT NEW ACCOUNT RECORD
-    $account = DynamoObject::create('test_account');
+    $account = new TestAccount();
     $account->account_type = 'ABC';
+    $account->ben = 'benson';
     $account->insert();
 
     $account_uuid = $account->getHashKey(); // automatically generated
 
-    $user1 = DynamoObject::create('test_user');
+    $user1 = new TestUser();
     $user1->account_uuid = $account->getHashKey();
     $user1->first_name = 'John';
     $user1->last_name = 'Doe';
 
-    $user2 = DynamoObject::create('test_user');
-    $user2->account_uuid = $account->getHashKey();
-    $user2->first_name = 'Sally';
-    $user2->last_name = 'Doe';
+    // you can also provide an array to prepopulate
+    $user2 = new TestUser( array(
+    	'account_uuid' => $account->getHashKey(),
+    	'first_name' => 'Sally',
+    	'last_name' => 'Doe'
+    ));
 
     // BATCH PUT
     DynamoObject::batch_put(array($user1, $user2));
 
-    // UPDATE
+    // UPDATE - you can choose where relations are set
     $account->{'users.' . $user1->getRangeKey()} = $user1;
     $account->{'users.' . $user2->getRangeKey()} = $user2;
     $account->update();
 
 
-    // CLEAR CACHE
-    DynamoObject::clearCache();
 
+### multi-dimensional access of properties and lazy loading
 
     // FETCH BY ID
-    $account = DynamoObject::fetch('test_account', $account_uuid);
-
-    foreach ($account->getAllRelations() as $name => $obj)
-    {
-        print "Relation: $name  ID:" . $obj->getId() . "\n";
-    }
+    $account = TestAccount::fetch($account_uuid);
 
     // MULTI-DIMENSIONAL ACCESS OF PROPERTIES
     foreach ($account->users as $user)
     {
-    	print "user id: " . $user->getRangeKey() . "\n"; 	// accessing key info will NOT load object
+        print "user id: " . $user->getRangeKey() . "\n";        // accessing key will NOT load object
     	print "user first name: " . $user->first_name . "\n"; 	// now object is loaded
     }
 
 
-    // CLEAR CACHE
-    DynamoObject::clearCache();
 
+### preloading (preventing lazy loading)
 
-    // BATCH LOAD
-    $account = DynamoObject::fetch('test_account', $account_uuid);
+    $account = TestAccount::fetch($account_uuid);
 
-    DynamoObject::batch_load( array_values($account->getAllRelations()) );
-    
+    // BATCH LOAD EXAMPLE
+    DynamoObject::batch_load( $account->getAllRelations() );
+
     foreach ($account->users as $user)
     {
     	print "user: " . $user->first_name . "\n";  // already preloaded
     }
 
-
-
-    function getConfig()
-    {
-        return array(
-    	'aws_key' => 'AKIAJV55GJBYPGDIIBTQ',
-    	'aws_secret' => '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',
-    	'dynamo_region' => 'us-east-1',
-    	'default_class' => '\BenBenson\DynamoObject',
-    	'tables' => array(
-    		'test_account' => array(
-    			'class' => '\BenBenson\DynamoObject',
-                    	'hash_key' => 'account_uuid',
-    			'hash_key_gen' => 'genUUIDv4',
-    			'ref_type' => 'hash',
-                            'relations' => array(
-                                    '/^users\./' => 'test_user'
-                            )
-                    ),
-    		'test_user' => array(
-    			'class' => '\BenBenson\DynamoObject',
-    			'hash_key' => 'account_uuid',
-                    	'range_key' => 'user_uuid',
-    			'range_key_gen' => 'genUUIDv4',
-    			'ref_type' => 'range'
-                    )
-            )
-        );
-    };
     
 
 ## METHODS
 ### Instance Methods
 
     // id methods
-    public function getTableName()
+    public function __construct(array $data=array())
+
+    public function getTableName()      // defined by subclass
     public function getId()
     public function getHashKey()
-    public function getHashKeyName()    
+    public function getHashKeyName()    // defined by subclass
 	public function setHashKey($value)
 	public function hasRangeKey()
     public function getRangeKey()
-    public function getRangeKeyName()
+    public function getRangeKeyName()   // defined by subclass
 	public function setRangeKey($value)
+    public function getRefValue()
 	public function isKeyValid()
 
-	// you can perform:  foreach($dynamoObject as $property => $value)
 	public function getIterator()
 	public function getKeys()
-
-	// returns array( $propertyName => $object or $objectProxy)
 	public function getAllRelations()
 	public function isModified()
 	public function isColumnModified($column)
 	public function getModifiedColumns()
     public function isLoaded()
-    public function isProxy()  // always returns false (DynamoObjectProxy object return true)
+    public function isProxy()
     
 
 ### Persistence Methods
 
+    public function load()      // (re)load from DB
     public function insert()    // exception if exists
-    public function update()    // exception if not existing, reloads object afterward
+    public function update()    // exception if not existing, refreshes object automatically
     public function put()       // replace if exists, returns old values
     public function delete()    // exception if not existing
-    public function load()      // reload from DB
 
 
-### Factories
-
-	// construct new object -- instantiates object class according to table config
-	public static function create($table, array $data=array())
+### Factories  (called against subclass type)
 
 	// retrieve an object from cache or from the database given its table and key(s)
-	public static function fetch($table, $hashKey, $rangeKey='')
+	public static function fetch($hashKey, $rangeKey='')
 
     // other factories
     public static function range_backward($table, $key, $limit=0, $lastKey=array())
@@ -200,10 +161,8 @@ This is an alpha release...  I intend to provide updates as I make them.
 
 ### Utility Methods
 
-	// return current Dynamo Client
-	public static function getClient()
-    
-    public static function getObjectClass($table)
+    public static function initialize(array $config=array())
+	public static function getClient()  \\ returns Dynamo Client 
 	public static function addToCache(\Spiderline\DynamoObject $object)
     public static function clearCache();
     public static function genUUIDv4()
@@ -211,38 +170,67 @@ This is an alpha release...  I intend to provide updates as I make them.
     public static function batch_put(array $dynamoObjects)
     public static function batch_load(array $dynamoObjects)
 
-	// helper methods for initializing a db
-	public static function deleteTable($table)
-    public static function createTable($table)  // uses table configuration
+	public static function deleteTable()
+    public static function createTable()
     public static function getTableStatus($table)
 
 
 
-## Configuration Class
+## Configuration
 
-    class Config {
-        public static $aws_key = 'KDEJHEWJ2373KJD82K382';
-        public static $aws_secret = '154HDfgh2383+TehjWg734REfies3423kjJhg6Rh';
-        public static $dynamo_region = 'us-east-1';
-        public static $dynamo_default_object_class = '\BenBenson\DynamoObject';
+Provided a few details for connecting to Amazon Dynamo...
 
-        public static $dynamo_table_mapping = array(
-                'custom_object' => array(
-                        'class' => '\Your\CustomObject', // must be subclass of DynamoObject
-                        'hashKey' => 'account_uuid',
-                        'rangeKey' => 'custom_uuid',
-			            'refType' => 'range',   		// can be hash, range or 'hash.range'
-                        'relations' => array(
-                                '/^subobjects\./' => 'another_object'
-                        )
-                ),
-                'another_object' => array(
-                        'class' => '\Your\CustomObject2',
-                        'hashKey' => 'account_uuid',
-                        'rangeKey' => 'custom_uuid',
-			            'refType' => 'range'
-                )
-        );
+    $config = array(
+        'aws_key' => 'M76HJV55GJBYPGDIIBTQ',
+        'aws_secret' => 'Wxj99L5QnsVb3ujdTeAzACb+X7E33Zi73p6Y9hJ',
+    	'dynamo_region' => 'us-east-1'
+    );
+    
+    DynamoObject::initialize( $config );
+
+
+Then create a subclass for each object and define a few require methods.
+
+    class TestAccount extends DynamoObject
+    {
+        public static function getTableName() {
+    		return 'test_account';
+    	}
+    	public static function getHashKeyName() {
+    		return 'account_uuid';
+    	}
+    	public static function getRangeKeyName() {
+    		return null;  // return null if there is no range key
+    	}
+    	public static function getRefType() {
+    		return 'hash';  // 'hash', 'range', or 'hash.range'
+    	}
+        
+        
+        // OPTIONAL (DEFAULTED) METHODS
+
+        // return array of Pattern => Class_Name
+    	public static function getRelationPatterns() {
+    		return array('/^users\..*/' => '\TestUser');  
+    	}
+        
+        // auto-generation of hashKey
+    	public static function generateHashKey() {
+    		return DynamoObject::genUUIDv4();       
+    	}
+        
+        public static function getHashKeyType() {
+            return 'S';
+        }
+        public static function getRangeKeyType() {
+            return 'S';
+        }
+        public static function getTableReadCapacityUnits() {
+            return 1;
+        }
+        public static function getTableWriteCapacityUnits() {
+            return 1;
+        }
     }
 
 
@@ -252,8 +240,8 @@ This is an alpha release...  I intend to provide updates as I make them.
 * batch_load() cascade support
 * custom exception(s)
 * handle S, N, SS, NN with schema config
-* method for validating table mapping configuration
 * cascading save
+* force use of defined hashKeyType and rangeKeyType
 * support for optimistic locking (using forced version property)
 
 
