@@ -15,7 +15,7 @@ This is an alpha release...  I intend to provide updates as I make them.
     * Access table and key information without invoking lazy loader
     * Preload objects in batch with graceful fallback to lazy loader
     * Define relations using regexp patterns
-    * Reference values can be 'hash_key', 'range_key' or 'both'
+    * Reference values can be 'hash_key', 'range_key' or 'hash.range'
     * If reference value is 'range_key', required hash_key property is automatically looked up
 * Access name/value pairs as multi-dimensional array
 * Sane methods:
@@ -36,7 +36,11 @@ This is an alpha release...  I intend to provide updates as I make them.
 * Subclass to create specific object types and add your own helper methods
 * Detects change to object key(s) so you can reuse object as template
 * Automatically generated keys with support for custom defined key generators
-
+* Sacrifices some automation for flexibility
+	* Store references to other tables under any property name you like
+	* Allows you to get maximum power out of dynamic no-sql schema:
+	* For example, log records with reference to related object:
+		* history.<date> = <reference_uuid>
 
 ## Example Usage
 

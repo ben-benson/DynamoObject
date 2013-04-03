@@ -4,11 +4,12 @@ namespace BenBenson;
 
 use \Exception;
 use \BenBenson\DynamoObject;
+use \BenBenson\DynamoObjectInt;
 
 
 class DynamoObjectProxy
 {
-	public $tableName;
+	public $clazz;
 	public $hashKey;
 	public $rangeKey;
 	public $id;
@@ -16,62 +17,72 @@ class DynamoObjectProxy
 	private $instance = null;
 
 
-	public function __construct($tableName, $hashKey, $rangeKey=null)
+	public function __construct($clazz, $hashKey, $rangeKey=null)
 	{
-		if (! isset(DynamoObject::$config['tables'][$tableName]))
+		if (! class_exists($clazz) || ! is_subclass_of($clazz, '\BenBenson\DynamoObject'))
 		{
-			throw new Exception('no table config for ' . $tableName);
+			throw new Exception('invalid class name: ' . $clazz);
 		}
 
-		$this->tableName = $tableName;
+		$this->clazz = $clazz;
 		$this->hashKey = $hashKey;
 		$this->rangeKey = $rangeKey;
 	}
  
+	public function getClassName()
+	{
+		return $this->clazz;
+	}
 	public function getTableName()
 	{
-		return $this->tableName;
-	}
-	public function getId()
-	{
-		if ($this->hasRangeKey())
-		{
-			return $this->hashKey . '.' . $this->rangeKey;
-		}
-		return  $this->hashKey;
-	}
-	public function getHashKey()
-	{
-		return $this->hashKey;
+		$clazz = $this->clazz;
+		return $clazz::getTableName();
 	}
 	public function hasRangeKey()
 	{
-		if ($this->rangeKey == null)
+		$clazz = $this->clazz;
+		if ($clazz::getRangeKeyName() == null)
 		{
 			return false;
 		}
 		return true;
 	}
+
+	public function getId()
+	{
+		if ($this->hasRangeKey())
+		{
+			return $this->getHashKey() . '.' . $this->getRangeKey();
+		}
+		return $this->getHashKey();
+	}
+	public function getHashKey()
+	{
+		return $this->hashKey;
+	}
 	public function getRangeKey()
 	{
 		return $this->rangeKey;
 	}
+	public function getRefType()
+	{
+		$clazz = $this->clazz;
+		return $clazz::getRefType();
+	}
 	public function getRefValue()
 	{
-		$refType = Config::$dynamo_table_mapping[$this->tableName]['refType'];
+		$refType = $this->getRefType();
 
-		if ($refType == 'range')
+		if ($refType == 'hash.range')
+		{
+			return $this->getHashKey() . '.' . $this->getRangeKey();
+		}
+		else if ($refType == 'range')
 		{
 			return $this->getRangeKey();
 		}
-		if ($refType == 'hash')
-		{
-			return $this->getHashKey();
-		}
-		else
-		{
-			return $this->getHashKey . '.' . $this->getRangeKey();
-		}
+
+		return $this->getHashKey();
 	}
 
 
@@ -86,8 +97,8 @@ class DynamoObjectProxy
  
 	private function initInstance()
 	{
-		//error_log('Loading: ' . $this->tableName);
-		return DynamoObject::fetch($this->tableName, $this->hashKey, $this->rangeKey);
+		$clazz = $this->clazz;
+		return $clazz::fetch($this->hashKey, $this->rangeKey);
 	}
  
 	public function __call($name, $arguments)

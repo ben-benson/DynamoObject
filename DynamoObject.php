@@ -2,21 +2,28 @@
 
 namespace BenBenson;
 
-use \Config;
 use \Exception;
 use \InvalidArgumentException;
 use \Aws\DynamoDb\DynamoDbClient;
 use \Aws\Common\Enum\Region;
 use \Aws\DynamoDb\Exception\DynamoDbException;
 
-class DynamoObject
+
+interface DynamoObjectInt
 {
-        public static $config;
+	static function getTableName();
+	static function getHashKeyName();
+	static function getRangeKeyName();
+	static function getRefType();	// returns 'hash', 'range', or 'hash.range'
+}
+
+abstract class DynamoObject implements DynamoObjectInt
+{
         private static $dynamo;
+	private static $config;
         private static $initialized = false;
 	private static $objectCache = array();
 
-	private $tableName;
 	private $data;
 	private $isLoaded = false;
 	private $modifiedColumns = array();
@@ -26,28 +33,63 @@ class DynamoObject
 
 	// INSTANCE METHODS =========================================================
 
-	public function getTableName()
+	public function __construct(array $data=array())
 	{
-		return $this->tableName;
+		if (count($data) > 0)
+		{
+			$this->data = $this->flatten($data);
+
+			// ensure seed data has safe values
+			if (! $this->isDataSafe($data))
+			{
+				throw new Exception('invalid data found in provided data array');
+			}
+
+			foreach ($data as $n => $v)
+			{
+				// digest any object relations provided as values
+				if (gettype($v) == 'object')
+				{
+					$this->relations[$n] = $v;
+					$this->data[$n] = $v->getRefValue();
+				}
+
+				$this->modifiedColumns[$n] = 1;
+			}
+
+			$this->createProxies($this->data);
+		}
+
+		if (! $this->getHashKey())
+		{
+			if (method_exists($this, 'generateHashKey'))
+			{
+				$this->setHashKey( $this->generateHashKey() );
+			}
+		}
+		if ($this->hasRangeKey() && ! $this->getRangeKey())
+		{
+			if (method_exists($this, 'generateRangeKey'))
+			{
+				$this->setRangeKey( $this->generateRangeKey() );
+			}
+		}
 	}
+
         public function getId()
         {
                 if ($this->hasRangeKey())
                 {
                         return $this->getHashKey() . '.' . $this->getRangeKey();
                 }
-                return $this->hashKey;
+                return $this->getHashKey();
         }
 	public function getHashKey()
 	{
-		if (isset($this->data[self::$config['tables'][$this->tableName]['hash_key']]))
+		if ( isset($this->data[$this->getHashKeyName()]) )
 		{
-			return $this->data[self::$config['tables'][$this->tableName]['hash_key']];
+			return $this->data[$this->getHashKeyName()];
 		}
-	}
-	public function getHashKeyName()
-	{
-		return self::$config['tables'][$this->tableName]['hash_key'];
 	}
 	public function setHashKey($value)
 	{
@@ -55,29 +97,23 @@ class DynamoObject
 		{
 			return;
 		}
-		$this->data[self::$config['tables'][$this->tableName]['hash_key']] = $value;
-		$this->modifiedColumns[self::$config['tables'][$this->tableName]['hash_key']] = 1;
+		$this->data[$this->getHashKeyName()] = $value;
+		$this->modifiedColumns[$this->getHashKeyName()] = 1;
 		$this->isLoaded = false;
 	}
 	public function hasRangeKey()
 	{
-		return isset(self::$config['tables'][$this->tableName]['range_key']);
+		if ($this->getRangeKeyName())
+		{
+			return true;
+		}
+		return false;
 	}
 	public function getRangeKey()
 	{
-		if ($this->hasRangeKey())
+		if (isset($this->data[$this->getRangeKeyName()]))
 		{
-			if (isset($this->data[self::$config['tables'][$this->tableName]['range_key']]))
-			{
-				return $this->data[self::$config['tables'][$this->tableName]['range_key']];
-			}
-		}
-	}
-	public function getRangeKeyName()
-	{
-		if ($this->hasRangeKey())
-		{
-			return self::$config['tables'][$this->tableName]['range_key'];
+			return $this->data[$this->getRangeKeyName()];
 		}
 	}
 	public function setRangeKey($value)
@@ -86,16 +122,30 @@ class DynamoObject
 		{
 			throw new Exception('no range key property for this object');
 		}
-		else if ($this->getRangeKey() == $value)
+		if ($this->getRangeKey() == $value)
 		{
 			return;
 		}
 
-		$this->data[self::$config['tables'][$this->tableName]['range_key']] = $value;
-		$this->modifiedColumns[self::$config['tables'][$this->tableName]['range_key']] = 1;
+		$this->data[$this->getRangeKeyName()] = $value;
+		$this->modifiedColumns[$this->getRangeKeyName()] = 1;
 		$this->isLoaded = false;
 	}
+        public function getRefValue()
+        {
+		$refType = $this->getRefType();
 
+		if ($refType == 'hash.range')
+		{
+	               	return $this->getHashKey() . '.' . $this->getRangeKey();
+		}
+                else if ($refType == 'range')
+                {
+                       	return $this->getRangeKey();
+                }
+
+		return $this->getHashKey();
+        }
 	public function isKeyValid()
 	{
 		if (! $this->getHashKey())
@@ -108,7 +158,6 @@ class DynamoObject
 		}
 		return true;
 	}
-
 	public function getIterator()
 	{
 		// merge in relations
@@ -116,12 +165,14 @@ class DynamoObject
 		$o = new ArrayObject($merged);
 		return $o->getIterator();
 	}
-
 	public function getKeys()
 	{
 		return array_keys($this->data);
 	}
-
+	public function getAllRelations()
+	{
+		return array_values($this->relations);
+	}
 	public function isModified()
 	{
 		if (count($this->modifiedColumns) > 0)
@@ -138,32 +189,10 @@ class DynamoObject
 	{
 		return $this->modifiedColumns;
 	}
-
-	public function getAllRelations()
-	{
-		return $this->relations;
-	}
 	public function isLoaded()
 	{
 		return $this->isLoaded;
 	}
-
-        public function getRefValue()
-        {
-                $refType = self::$config['tables'][$this->tableName]['ref_type'];
-
-                if ($refType == 'range')
-                {
-                       	return $this->getRangeKey();
-                }
-               	else if ($refType == 'hash')
-                {
-                       	return $this->getHashKey();
-                }
-
-               	return $this->getHashKey . '.' . $this->getRangeKey();
-        }
-
         public function isProxy()
         {
                 return false;
@@ -181,7 +210,7 @@ class DynamoObject
                 }
 
                 $get = array(
-                        'TableName' => $this->tableName,
+                        'TableName' => $this->getTableName(),
                         'Key' => array(
                                 'HashKeyElement' => self::getClient()->formatValue($this->getHashKey())
                         )
@@ -215,6 +244,47 @@ class DynamoObject
 		self::addToCache($this);
 	}
 
+        public function insert()
+        {
+		if ($this->isLoaded())
+		{
+			throw new Exception('cannot insert, already exists');
+		}
+               	else if (! $this->isKeyValid())
+		{
+			throw new Exception('object key is not properly defined');
+		}
+               	else if (! $this->isModified())
+		{
+			return;
+		}
+
+		$insert = array(
+			'TableName' => $this->getTableName(),
+			'Item' => self::getClient()->formatAttributes($this->data),
+			'Expected' => array(
+				$this->getHashKeyName() => array( 'Exists' => false )
+			)
+                );
+
+		if ($this->hasRangeKey())
+		{
+			$insert['Expected'][$this->getRangeKeyName()] = array( 'Exists' => false );
+		}
+
+                try
+                {
+                        $result = self::getClient()->putItem( $insert );
+                }
+                catch(Aws\DynamoDb\Exception\ConditionalCheckFailedException $e)
+                {
+                       	throw new Exception('key already exists');
+                }
+
+
+		$this->modifiedColumns = array();
+		$this->isLoaded = true;
+        }
 
         public function update()
         {
@@ -228,7 +298,7 @@ class DynamoObject
 		}
 
                 $update = array(
-                        'TableName' => $this->tableName,
+                        'TableName' => $this->getTableName(),
                      	'Key' => array(
                                 'HashKeyElement' => array(
                                         self::type($this->getHashKey()) => $this->getHashKey()
@@ -283,49 +353,6 @@ class DynamoObject
 		$this->isLoaded = true;
         }
 
-
-        public function insert()
-        {
-		if ($this->isLoaded())
-		{
-			throw new Exception('cannot insert, already exists');
-		}
-               	else if (! $this->isKeyValid())
-		{
-			throw new Exception('object key is not properly defined');
-		}
-               	else if (! $this->isModified())
-		{
-			return;
-		}
-
-		$insert = array(
-			'TableName' => $this->tableName,
-			'Item' => self::getClient()->formatAttributes($this->data),
-			'Expected' => array(
-				self::$config['tables'][$this->tableName]['hash_key'] => array( 'Exists' => false )
-			)
-                );
-
-		if ($this->hasRangeKey())
-		{
-			$insert['Expected'][self::$config['tables'][$this->tableName]['range_key']] = array( 'Exists' => false );
-		}
-
-                try
-                {
-                        $result = self::getClient()->putItem( $insert );
-                }
-                catch(Aws\DynamoDb\Exception\ConditionalCheckFailedException $e)
-                {
-                       	throw new Exception('key already exists');
-                }
-
-
-		$this->modifiedColumns = array();
-		$this->isLoaded = true;
-        }
-
         public function put()
         {
                	if (! $this->isKeyValid())
@@ -334,7 +361,7 @@ class DynamoObject
 		}
 
                 $result = self::getClient()->putItem( array(
-                        'TableName' => $this->tableName,
+                        'TableName' => $this->getTableName(),
                         'Item' => self::getClient()->formatAttributes($this->data),
                         'ReturnValues' => 'ALL_OLD'
                 ));
@@ -358,7 +385,7 @@ class DynamoObject
 		}
 
 		$delete = array(
-                        'TableName' => $this->tableName,
+                        'TableName' => $this->getTableName(),
                      	'Key' => array(
                                 'HashKeyElement' => array(
                                         self::type($this->getHashKey()) => $this->getHashKey()
@@ -386,47 +413,20 @@ class DynamoObject
 
 
 
+
 	// STATIC FACTORIES ==========================================================
 
-	public static function initialize(array $config=array())
+	public static function fetch($hashKey, $rangeKey=null)
 	{
-		if (! $config)
+                self::initialize();
+
+		$clazz = get_called_class();
+		if (! is_subclass_of($clazz, '\BenBenson\DynamoObject'))
 		{
-			if (self::$initialized)
-			{
-				return;
-			}
-			else if (isset(Config::$dynamo_config))
-			{
-				$config = Config::$dynamo_config;
-			}
-			else
-			{
-				throw new Exception('DynamoObject Not Configured!');
-			}
+			throw new Exception('must be called on subclass of DynamoObject');
 		}
 
-		// TODO: perform validation of config
-		self::$config = $config;
-
-               	self::$dynamo = DynamoDbClient::factory(array(
-               	  'key'    => self::$config['aws_key'],
-               	  'secret' => self::$config['aws_secret'],
-               	  'region' => self::$config['dynamo_region']
-               	));
-		
-		self::$initialized = true;
-        }
-
-	public static function create($table, array $data=array())
-	{
-		$clazz = self::getObjectClass($table);
-		return new $clazz($table, $data);
-	}
-
-	public static function fetch($table, $hashKey, $rangeKey=null)
-	{
-		$obj = self::create($table);
+		$obj = new $clazz();
 		$obj->setHashKey($hashKey);
 
 		if ($obj->hasRangeKey() && ! $rangeKey)
@@ -440,22 +440,27 @@ class DynamoObject
 		$id = $obj->getId();
 
 		// check cache
-		if (isset(self::$objectCache[$table][$id]))
+		if (isset(self::$objectCache[$clazz::getTableName()][$id]))
 		{
-			error_log("returning cached object for $table->$id");
-			return self::$objectCache[$table][$id];
+			error_log('returning cached object for ' . $clazz::getTableName());
+			return self::$objectCache[$clazz::getTableName()][$id];
 		}
 
 		$obj->load();
 		return $obj;
 	}
 
-        public static function range_backward($table, $key, $limit=0, $lastKey=array())
+        public static function range_backward($key, $limit=0, $lastKey=array())
         {
                 self::initialize();
+		$clazz = get_called_class();
+		if (! is_subclass_of($clazz, \BenBenson\DynamoObject))
+		{
+			throw new Exception('must be called on subclass of DynamoObject');
+		}
 
                 $q = array(
-                        'TableName' => $table,
+                        'TableName' => $clazz::getTableName(),
                         'HashKeyValue' => array( self::type($key) => $key),
                         'ScanIndexForward' => false
                 );
@@ -477,11 +482,10 @@ class DynamoObject
                         $lastKey = $response['LastEvaluatedKey'];
                 }
 
-		$clazz = self::getObjectClass($table);
 		$objs = array();
 		foreach ($response['Items'] as $item)
 		{
-			$obj = new $clazz($table, self::unformat($item));
+			$obj = new $clazz(self::unformat($item));
 			$obj->setIsLoaded(true);
 			$objs[] = $obj;
 		}
@@ -489,11 +493,17 @@ class DynamoObject
                 return array($objs, $lastKey);
 	}
 
-	public static function range_prefix($table, $key, $rangeKeyPrefix, $limit=0, $lastKey=array())
+	public static function range_prefix($key, $rangeKeyPrefix, $limit=0, $lastKey=array())
         {
                 self::initialize();
+		$clazz = get_called_class();
+		if (! is_subclass_of($clazz, \BenBenson\DynamoObject))
+		{
+			throw new Exception('must be called on subclass of DynamoObject');
+		}
+
                 $q = array(
-                        'TableName' => $table,
+                        'TableName' => $clazz::getTableName(),
                         'HashKeyValue' => array( self::type($key) => $key),
                         'RangeKeyCondition' => array(
                                 'ComparisonOperator' => 'BEGINS_WITH',
@@ -520,11 +530,10 @@ class DynamoObject
                         $lastKey = $response['LastEvaluatedKey'];
                 }
 
-		$clazz = self::getObjectClass($table);
 		$objs = array();
 		foreach ($response['Items'] as $item)
 		{
-			$obj = new $clazz($table, self::unformat($item));
+			$obj = new $clazz(self::unformat($item));
 			$obj->setIsLoaded(true);
 			$objs[] = $obj;
 		}
@@ -532,12 +541,17 @@ class DynamoObject
                 return array($objs, $lastKey);
         }
 
-	public static function range_getall($table, $key)
+	public static function range_getall($key)
         {
                 self::initialize();
+		$clazz = get_called_class();
+		if (! is_subclass_of($clazz, \BenBenson\DynamoObject))
+		{
+			throw new Exception('must be called on subclass of DynamoObject');
+		}
 
                 $result = self::getClient()->query( array(
-                        'TableName' => $table,
+                        'TableName' => $clazz::getTableName(),
 			'HashKeyValue' => self::getClient()->formatAttributes($key)
                 ));
 
@@ -547,11 +561,10 @@ class DynamoObject
                 }
 
                 $objs = array();
-		$clazz = self::getObjectClass($table);
 
                 foreach ($result['Items'] as $item)
                 {
-			$obj = new $clazz($table, self::unformat($item));
+			$obj = new $clazz(self::unformat($item));
 			$obj->setIsLoaded(true);
                         $objs[] = $obj;
                 }
@@ -563,23 +576,43 @@ class DynamoObject
 
 	// UTILITIY METHODS ==========================================================
 
+	public static function initialize(array $config=array())
+	{
+		if ($config)
+		{
+			if (
+				! isset($config['aws_key']) || 
+				! isset($config['aws_secret']) || 
+				! isset($config['dynamo_region'])
+			)
+			{
+				throw new InvalidArgumentException('missing configuration property');
+			}
+
+			self::$config = $config;
+
+        	       	self::$dynamo = DynamoDbClient::factory(array(
+        	       	  'key'    => self::$config['aws_key'],
+        	       	  'secret' => self::$config['aws_secret'],
+        	       	  'region' => self::$config['dynamo_region']
+        	       	));
+
+			self::$initialized = true;
+			return;
+		}
+
+		if (self::$initialized)
+		{
+			return;
+		}
+
+		throw new Exception('DynamoObject Not Configured!');
+        }
+
 	public static function getClient()
         {
                 self::initialize();
                 return self::$dynamo;
-        }
-
-        public static function getObjectClass($table)
-        {
-                if (isset(self::$config['tables'][$table]['class']))
-                {
-                        if (class_exists(self::$config['tables'][$table]['class']))
-                        {
-                                return self::$config['tables'][$table]['class'];
-                        }
-                }
-
-                return self::$config['default_class'];
         }
 
 	public static function addToCache(\BenBenson\DynamoObject $obj)
@@ -615,7 +648,6 @@ class DynamoObject
             );
 	}
 
-
         public static function batch_put(array $objs)
         {
                 self::initialize();
@@ -624,9 +656,9 @@ class DynamoObject
 
                 foreach ($objs as $obj)
                 {
-			if (! $obj instanceof \BenBenson\DynamoObject)
+			if (! $obj instanceof \BenBenson\DynamoObject && ! $obj instanceof \BenBenson\DynamoObjectProxy)
 			{
-				throw new InvalidArgumentException();
+				throw new InvalidArgumentException('not an instance of DynamoObject or DynamoObjectProxy');
 			}
 			else if (! $obj->isKeyValid())
 			{
@@ -661,10 +693,6 @@ class DynamoObject
                	}
                 return true;
         }
-
-        // $tableItems = array();
-        // $tableItems["table1"][] = array( key )
-        // $tableItems["table1"][] = array( key, range )
 
         public static function batch_load(array $objs)
         {
@@ -716,36 +744,87 @@ class DynamoObject
                 }
 
                 foreach ($result['Responses'] as $table => $a)
-                {
+		{
 			foreach ($result['Responses'][$table]['Items'] as $item)
-			{				
-				$data = self::unformat($item);
-				$obj = self::create($table, $data);
-				$obj->setIsLoaded(true);
-				$id = $obj->getId();
+			{
+				// TODO: now we need to find matching provided object based on tableName and key(s)
+				// $map[$obj->getTableName()][$obj->getId()] = $obj;
 
-				$pObj = $map[$table][$id];
-				if ($pObj->isProxy() == true)
+				$data = self::unformat($item);
+				$obj = null;
+
+				foreach ($map[$table] as $id => $o)
+				{
+					if (self::matchesKey($o, $data))
+					{
+						$obj = $o;
+						break;
+					}
+				}
+				if ($obj == null)
+				{
+					error_log("WARNING: didnt find a match from DynamoObject::batch_load()");
+					continue;
+				}
+
+				if ($obj->isProxy() == true)
 				{
 					// just store new object in cache
-					self::addToCache($obj);
+					$clazz = $obj->getClassName();
+					$nObj = new $clazz($data);
+					$nObj->setIsLoaded(true);
+					self::addToCache($nObj);
 				}
 				else
 				{
 					// adds to cache for us
-					$pObj->setInternalDataArray($data, true);
+					$obj->setInternalDataArray($data, true);
 				}
-			}
-                }
+
+			} // loop on items
+                } // loop on table
         }
 
-	public static function deleteTable($table)
+	private static function matchesKey($obj, array &$data)
+	{
+		if (! $obj->getHashKey())
+		{
+			return false;
+		}
+		if (! isset($data[$obj->getHashKeyName()]))
+		{
+			return false;
+		}
+		if ($data[$obj->getHashKeyName()] != $obj->getHashKey())
+		{
+			return false;
+		}
+		if (! $obj->hasRangeKey())
+		{
+			return true;
+		}
+		if (! isset($data[$obj->getRangeKeyName()]))
+		{
+			return false;
+		}
+		if ($data[$obj->getRangeKeyName()] != $obj->getRangeKey())
+		{
+			return false;
+		}
+		return true;
+	}
+
+	public static function deleteTable()
         {
-                self::initialize();
+                $clazz = get_called_class();
+                if (! is_subclass_of($clazz, \BenBenson\DynamoObject))
+                {
+                        throw new Exception('must be called on subclass of DynamoObject');
+                }
 
                 try {
                      	$result = self::getClient()->deleteTable( array(
-                                'TableName' => $table
+                                'TableName' => $this->getTableName()
                         ));
                 }
                 catch(Aws\DynamoDb\Exception\ResourceNotFoundException $e)
@@ -761,53 +840,47 @@ class DynamoObject
                 return true;
         }
 
-	// TODO:  follow table configuration
-        public static function createTable($table)
+        public static function createTable()
         {
-                self::initialize();
+                $clazz = get_called_class();
+                if (! is_subclass_of($clazz, '\BenBenson\DynamoObject'))
+                {
+                        throw new Exception('must be called on subclass of DynamoObject');
+                }
 
-		if (! isset(self::$config['tables'][$table]))
-		{
-			throw new Exception('no mapping defined for this table: ' . $table);
-		}
-
-		$hashKey = null;
+		$hashKeyName = null;
 		$hashKeyType = 'S';
-		$rangeKey = null;
+		$rangeKeyName = null;
 		$rangeKeyType = 'S';
 		$readCapacityUnits = 1;
 		$writeCapacityUnits = 1;
 
-		if (isset(self::$config['tables'][$table]['hash_key']))
+		$hashKeyName = $clazz::getHashKeyName();
+		if (method_exists($clazz, 'getHashKeyType'))
 		{
-			$hashKey = self::$config['tables'][$table]['hash_key'];
+			$hashKeyType = $clazz::getHashKeyType();
 		}
-		if (isset(self::$config['tables'][$table]['hash_key_type']))
+
+		$rangeKeyName = $clazz::getRangeKeyName();
+		if (method_exists($clazz, 'getRangeKeyType'))
 		{
-			$hashKeyType = self::$config['tables'][$table]['hash_key_type'];
+			$rangeKeyType = $clazz::getRangeKeyType();
 		}
-		if (isset(self::$config['tables'][$table]['range_key']))
+
+		if (method_exists($clazz, 'getTableReadCapacityUnits'))
 		{
-			$rangeKey = self::$config['tables'][$table]['range_key'];
+			$readCapacityUnits = $clazz::getTableReadCapacityUnits();
 		}
-		if (isset(self::$config['tables'][$table]['range_key_type']))
+		if (method_exists($clazz, 'getTableWriteCapacityUnits'))
 		{
-			$rangeKeyType = self::$config['tables'][$table]['range_key_type'];
-		}
-		if (isset(self::$config['tables'][$table]['read_capacity_units']))
-		{
-			$readCapacityUnits = self::$config['tables'][$table]['read_capacity_units'];
-		}
-		if (isset(self::$config['tables'][$table]['writeCapacityUnits']))
-		{
-			$writeCapacityUnits = self::$config['tables'][$table]['write_capacity_units'];
+			$writeCapacityUnits = $clazz::getTableWriteCapacityUnits();
 		}
 
                 $q = array(
-                        'TableName' => $table,
+                        'TableName' => $clazz::getTableName(),
                         'KeySchema' => array(
                                 'HashKeyElement' => array(
-                                        'AttributeName' => $hashKey,
+                                        'AttributeName' => $hashKeyName,
                                         'AttributeType' => $hashKeyType
                                 )
                         ),
@@ -817,10 +890,10 @@ class DynamoObject
                         )
                 );
 
-                if ($rangeKey)
+                if ($rangeKeyName)
                 {
                         $q['KeySchema']['RangeKeyElement'] = array(
-                                'AttributeName' => $rangeKey,
+                                'AttributeName' => $rangeKeyName,
                                 'AttributeType' => $rangeKeyType
                         );
                 }
@@ -842,14 +915,18 @@ class DynamoObject
                 }
         }
 
-        public static function getTableStatus($table)
+        public function getTableStatus()
         {
-                self::initialize();
+                $clazz = get_called_class();
+                if (! is_subclass_of($clazz, '\BenBenson\DynamoObject'))
+                {
+                        throw new Exception('must be called on subclass of DynamoObject');
+                }
 
                 try
                 {
                         $result = self::getClient()->describeTable( array(
-                                'TableName' => $table
+                                'TableName' => $this->getTableName()
                         ));
                 }
                 catch(Aws\DynamoDb\Exception\ResourceNotFoundException $e)
@@ -864,12 +941,6 @@ class DynamoObject
 
                 return $result['Table']['TableStatus'];
         }
-
-
-	public static function isTableConfigured($table)
-	{
-		return isset(self::$config['tables'][$table]);
-	}
 
 
 
@@ -892,7 +963,7 @@ class DynamoObject
 		$r = array();
 		foreach ($this->data as $n => $v)
 		{
-			if (self::startsWith($n, $name . '.'))
+			if ($this->startsWith($n, $name . '.'))
 			{
 				if (isset($this->relations[$n]))
 				{
@@ -912,6 +983,7 @@ class DynamoObject
 	}
 
 
+	// TODO: prevent setting object as value unless matched by relations pattern in config
 	public function __set($name, $value)
 	{
 		if (gettype($value) == 'array')
@@ -974,7 +1046,7 @@ class DynamoObject
 		}
 		foreach ($this->data as $n)
 		{
-			if (self::startsWith($n, $name . '.'))
+			if ($this->startsWith($n, $name . '.'))
 			{
 				return true;
 			}
@@ -995,7 +1067,7 @@ class DynamoObject
 		}
 		foreach ($this->data as $n)
 		{
-			if (self::startsWith($n, $name . '.'))
+			if ($this->startsWith($n, $name . '.'))
 			{
 				if (isset($this->relations[$n]))
 				{
@@ -1009,69 +1081,10 @@ class DynamoObject
 
 
 
-	// PRIVATE or PROTECTED METHODS =============================================
+	// PRIVATE METHODS =============================================
 
-	protected function __construct($tableName, array $data=array())
-	{
-		if (! isset(self::$config['tables'][$tableName]))
-		{
-			throw new Exception('no mapping defined for this table: ' . $tableName);
-		}
 
-		$this->tableName = $tableName;
-
-		if (count($data) > 0)
-		{
-			$this->data = $this->flatten($data);
-
-			if (! $this->isKeyValid())
-			{
-				throw new Exception('invalid key');
-			}
-
-			// ensure seed data has safe values
-			if (! $this->isDataSafe($data))
-			{
-				throw new Exception('invalid data found in provided data array');
-			}
-
-			foreach ($data as $n => $v)
-			{
-				// digest any object relations provided as values
-				if (gettype($v) == 'object')
-				{
-					$this->relations[$n] = $v;
-					$this->data[$n] = $v->getRefValue();
-				}
-
-				$this->modifiedColumns[$n] = 1;
-			}
-
-			$this->createProxies($this->data);
-		}
-
-		if (! $this->getHashKey())
-		{
-			if (isset(self::$config['tables'][$tableName]['hash_key_gen']))
-			{
-				$gen = self::$config['tables'][$tableName]['hash_key_gen'];
-				$key = self::$gen();
-				$this->setHashKey( $key );
-			}
-		}
-		if ($this->hasRangeKey() && ! $this->getRangeKey())
-		{
-			if (isset(self::$config['tables'][$tableName]['range_key_gen']))
-			{
-				$gen = self::$config['tables'][$tableName]['range_key_gen'];
-				$key = self::$gen();
-				$this->setRangeKey( $key );
-			}
-		}
-
-	}
-
-	protected function setIsLoaded($bool)
+	private function setIsLoaded($bool)
 	{
 		$this->isLoaded = $bool;
 	}
@@ -1133,7 +1146,6 @@ class DynamoObject
 		return $r;
 	}
 
-
 	private function assignArrayByPath(&$arr, $path, $value)
 	{
 		$keys = explode('.', $path);
@@ -1163,9 +1175,8 @@ class DynamoObject
 	}
 
 
-
        	// hash[name => hash[type => value]]  translated to  hash[name => value]
-        protected static function unformat($hash)
+        private static function unformat($hash)
         {
                 $u = array();
                 foreach ($hash as $name => $t)
@@ -1179,7 +1190,7 @@ class DynamoObject
                 return $u;
         }
 	
-        protected static function type($value)
+        private static function type($value)
         {
                 if (gettype($value) == "string")
                 {
@@ -1213,12 +1224,11 @@ class DynamoObject
 	// given (name, value) return proxy object if pattern is matched, else null
 	private function getProxyObject($name, $value, array &$data)
 	{
-		if (! isset(self::$config['tables'][$this->tableName]['relations']))
+		if (! method_exists($this, 'getRelationPatterns'))
 		{
 			return;
 		}
-
-		foreach (self::$config['tables'][$this->tableName]['relations'] as $pattern => $targetTable)
+		foreach ($this->getRelationPatterns() as $pattern => $targetClass)
 		{
 			// does not match pattern
 			if (preg_match($pattern, $name) != 1)
@@ -1228,7 +1238,7 @@ class DynamoObject
 
 			$targetHashKey = null;
 			$targetRangeKey = null;
-			$targetRefType = self::$config['tables'][$targetTable]['ref_type'];
+			$targetRefType = $targetClass::getRefType();
 
 			if ($targetRefType == 'range')
 			{
@@ -1245,14 +1255,14 @@ class DynamoObject
 
 			if ($targetHashKey == null)
 			{
-				$targetHashKey = $data[ self::$config['tables'][$targetTable]['hash_key'] ];
+				$targetHashKey = $data[ $targetClass::getHashKeyName() ];
 			}
-			else if ($targetRangeKey == null && isset( self::$config['tables'][$targetTable]['range_key'] ))
+			else if ($targetRangeKey == null && $targetClass::getRangeKeyName() != null)
 			{
-				$targetRangeKey = $data[  self::$config['tables'][$targetTable]['range_key'] ];
+				$targetRangeKey = $data[  $targetClass::getRangeKeyName() ];
 			}
 
-			return new DynamoObjectProxy($targetTable, $targetHashKey, $targetRangeKey);
+			return new DynamoObjectProxy($targetClass, $targetHashKey, $targetRangeKey);
 		}
 	}
 
@@ -1281,13 +1291,13 @@ class DynamoObject
 	}
 
 	// required for batch_put
-	protected function getInternalDataArray()
+	private function getInternalDataArray()
 	{
 		return $this->data;
 	}
 
 	// required for batch_load, we need ability to set fully loaded data array on existing objects
-	protected function setInternalDataArray(array $data, $isLoaded)
+	private function setInternalDataArray(array $data, $isLoaded)
 	{
 		if (! $this->isDataSafe($data))
 		{
