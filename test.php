@@ -50,8 +50,8 @@ class TestUser extends DynamoObject {
 header("Content-Type: text/plain");
 
 DynamoObject::initialize( array(
-	'aws_key' => 'AKIAJKDHFDJDEHENEBE',
-	'aws_secret' => '5lJdfhjdsfjJd65757HJhksdft6HJdf6',
+	'aws_key' => 'XXXXX',
+	'aws_secret' => 'ZZZZZZ',
 	'dynamo_region' => 'us-east-1'
 ));
 
