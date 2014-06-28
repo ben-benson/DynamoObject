@@ -1,0 +1,29 @@
+{
+    "name":"ben-benson/DynamoObject",
+    "description":"PHP-Bundle to interact with DynamoDB",
+    "keywords":["dynamo","db","dynamodb","aws","amazon"],
+    "type":"library",
+    "license":"MIT",
+    "authors":[
+        {
+            "name":"Ben Benson",
+            "email":"ben@benbenson.com",
+            "homepage":"http://benbenson.com/"
+        },
+        {
+            "name":"Jonatan Männchen",
+            "email":"jonatan@maennchen.ch",
+            "homepage":"http://commanders.ch"
+        }
+    ],
+    "homepage": "https://github.com/ben-benson/DynamoObject",
+    "require":{
+        "php":">=5.3.5",
+        "aws/aws-sdk-php": ">=2.1.2,<2.4"
+    },
+    "autoload":{
+        "psr-0":{
+            "BenBenson\\": ""
+        }
+    }
+}
